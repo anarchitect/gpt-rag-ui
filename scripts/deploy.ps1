@@ -41,7 +41,8 @@ if ($env:DEBUG -eq 'true') {
 
 Write-Host ""  # blank line
 
-#region Early Docker validation
+#region Docker availability detection
+$script:UseLocalDocker = $false
 $pausedPattern   = 'Docker Desktop is manually paused'
 $daemonDownRegex = '((?i)error during connect|Cannot connect to the Docker daemon|Is the docker daemon running|The Docker daemon is not running|dockerDesktopLinuxEngine|dockerDesktopWindowsEngine|The system cannot find the file specified|open \\./pipe/|context deadline exceeded)'
 
@@ -60,20 +61,14 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     $probeText   = ($probeOutput | Out-String)
 
     if ($probeText -match $pausedPattern -or $probeText -match $daemonDownRegex -or $probeExit -ne 0) {
-        if ($probeText -match $pausedPattern) {
-            Write-ErrorColored '❌ Docker Desktop is manually paused. Unpause it via the Whale menu or Dashboard.'
-        } else {
-            Write-ErrorColored '❌ Docker Desktop is not running.'
-        }
-        Write-Yellow '⚠️  Please start/unpause Docker Desktop and re-run this script.'
-        exit 1
+        Write-Yellow '⚠️  Docker is unavailable locally. Falling back to ACR cloud build.'
+    } else {
+        $script:UseLocalDocker = $true
+        Write-Green "✅ Docker is available."
     }
 } else {
-    Write-ErrorColored '❌ Docker CLI not found on this system.'
-    Write-Yellow '⚠️  Please install Docker Desktop and re-run this script.'
-    exit 1
+    Write-Yellow '⚠️  Docker CLI not found locally. Falling back to ACR cloud build.'
 }
-Write-Green "✅ Docker is available."
 Write-Host ""
 #endregion
 
@@ -246,7 +241,7 @@ if ($env:tag) {
 #region Build or ACR build image
 $fullImageName = "$($values.CONTAINER_REGISTRY_LOGIN_SERVER)/azure-gpt-rag/frontend:$tag"
 Write-Green "🛠️  Building Docker image…"
-if (Get-Command docker -ErrorAction SilentlyContinue) {
+if ($script:UseLocalDocker) {
     try {
         docker build --platform linux/amd64 -t $fullImageName .
         Write-Green "✅ Docker build succeeded."
@@ -274,7 +269,7 @@ Write-Host ""
 #endregion
 
 #region Push Docker image (if local build used)
-if (Get-Command docker -ErrorAction SilentlyContinue) {
+if ($script:UseLocalDocker) {
     Write-Green "📤 Pushing image…"
     try {
         docker push $fullImageName
