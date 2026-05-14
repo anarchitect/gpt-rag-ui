@@ -435,7 +435,23 @@ async def handle_message(message: cl.Message):
         uuid_buffer = ""
 
         try:
-            async for raw_chunk in generator:
+            async for stream_event in generator:
+                if not stream_event:
+                    continue
+
+                if isinstance(stream_event, dict):
+                    event_type = stream_event.get("type")
+                    if event_type == "metadata":
+                        conversation_id = stream_event.get("conversation_id") or conversation_id
+                        is_first_chunk = False
+                        continue
+                    if event_type == "token":
+                        raw_chunk = stream_event.get("text", "")
+                    else:
+                        continue
+                else:
+                    raw_chunk = stream_event
+
                 if not raw_chunk:
                     continue
 

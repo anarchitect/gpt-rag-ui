@@ -26,6 +26,36 @@ _SENSITIVE_HEADER_KEYS = {
 _SENSITIVE_JSON_KEY_RE = re.compile(r"(authorization|token|secret|password|api[_-]?key|cookie)", re.IGNORECASE)
 
 
+async def _aiter_sse_events(response: httpx.Response):
+    event_type = "message"
+    data_lines = []
+
+    async for line in response.aiter_lines():
+        if line == "":
+            if data_lines:
+                yield event_type, "\n".join(data_lines)
+            event_type = "message"
+            data_lines = []
+            continue
+
+        if line.startswith(":"):
+            continue
+
+        field, separator, value = line.partition(":")
+        if not separator:
+            continue
+        if value.startswith(" "):
+            value = value[1:]
+
+        if field == "event":
+            event_type = value
+        elif field == "data":
+            data_lines.append(value)
+
+    if data_lines:
+        yield event_type, "\n".join(data_lines)
+
+
 def _mask_secret(value: object, *, keep_start: int = 6, keep_end: int = 4) -> str:
     if value is None:
         return "<empty>"
@@ -330,9 +360,28 @@ async def call_orchestrator_stream(conversation_id: str, question: str, auth_inf
                         f"Orchestrator returned HTTP {response.status_code} {response.reason_phrase}. "
                         f"url={url} details={snippet}"
                     )
-                async for chunk in response.aiter_text():
-                    if chunk:
-                        yield chunk
+                async for event_type, data in _aiter_sse_events(response):
+                    if not data:
+                        continue
+
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        logger.warning("Skipping malformed SSE payload from orchestrator: event=%s", event_type)
+                        continue
+
+                    if event_type == "metadata":
+                        yield {
+                            "type": "metadata",
+                            "conversation_id": payload.get("conversation_id"),
+                        }
+                    elif event_type == "token":
+                        text = payload.get("text", "")
+                        if text:
+                            yield {"type": "token", "text": text}
+                    elif event_type == "error":
+                        message = payload.get("message") or "An internal server error occurred."
+                        raise RuntimeError(f"Orchestrator stream error: {message}")
     except httpx.ConnectError as e:
         hint = _hint_for_connect_error(target_context)
         logger.error(
