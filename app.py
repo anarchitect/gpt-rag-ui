@@ -17,7 +17,14 @@ from feedback import register_feedback_handlers,create_feedback_actions
 from dependencies import get_config
 from connectors import BlobClient
 
-from constants import APPLICATION_INSIGHTS_CONNECTION_STRING, APP_NAME, UUID_REGEX, REFERENCE_REGEX, TERMINATE_TOKEN
+from constants import (
+    APPLICATION_INSIGHTS_CONNECTION_STRING,
+    APP_NAME,
+    UUID_REGEX,
+    REFERENCE_REGEX,
+    TERMINATE_TOKEN,
+    STREAMING_RESPONSES_FEATURE_FLAG,
+)
 from telemetry import Telemetry
 from opentelemetry.trace import SpanKind
 from chainlit.types import ThreadDict
@@ -399,8 +406,6 @@ async def handle_message(message: cl.Message):
             _trim_for_log(message.content),
         )
 
-        await response_msg.stream_token(" ")
-
         response_start_time = time.time()
         buffer = ""
         full_text = ""
@@ -427,6 +432,21 @@ async def handle_message(message: cl.Message):
             message.id,
             _trim_for_log(message.content),
         )
+        streaming_enabled = config.get_feature_flag(STREAMING_RESPONSES_FEATURE_FLAG, default=True)
+        span.set_attribute("streaming_enabled", streaming_enabled)
+        logger.info(
+            "Response streaming mode: conversation=%s question_id=%s feature_flag=%s enabled=%s",
+            conversation_id or "new",
+            message.id,
+            STREAMING_RESPONSES_FEATURE_FLAG,
+            streaming_enabled,
+        )
+
+        message_sent = False
+        if streaming_enabled:
+            await response_msg.stream_token(" ")
+            message_sent = True
+
         generator = call_orchestrator_stream(conversation_id, message.content, auth_info, message.id)
 
         chunk_count = 0
@@ -512,8 +532,9 @@ async def handle_message(message: cl.Message):
                 # Handle TERMINATE token
                 token_index = buffer.find(TERMINATE_TOKEN)
                 if token_index != -1:
-                    if token_index > 0:
+                    if token_index > 0 and streaming_enabled:
                         await response_msg.stream_token(buffer[:token_index])
+                        message_sent = True
                     logger.debug(
                         "Terminate token detected, draining remaining orchestrator stream: conversation=%s question_id=%s",
                         conversation_id or "pending",
@@ -530,7 +551,9 @@ async def handle_message(message: cl.Message):
                     safe_flush_length = len(buffer)
 
                 if safe_flush_length > 0:
-                    await response_msg.stream_token(buffer[:safe_flush_length])
+                    if streaming_enabled:
+                        await response_msg.stream_token(buffer[:safe_flush_length])
+                        message_sent = True
                     buffer = buffer[safe_flush_length:]
 
         except httpx.ConnectError as e:
@@ -548,6 +571,7 @@ async def handle_message(message: cl.Message):
             full_text = user_error_message
             buffer = ""
             await response_msg.stream_token(user_error_message)
+            message_sent = True
 
         except httpx.TimeoutException as e:
             logger.error(
@@ -564,6 +588,7 @@ async def handle_message(message: cl.Message):
             full_text = user_error_message
             buffer = ""
             await response_msg.stream_token(user_error_message)
+            message_sent = True
 
         except Exception as e:
             user_error_message = (
@@ -579,6 +604,7 @@ async def handle_message(message: cl.Message):
             full_text = user_error_message
             buffer = ""
             await response_msg.stream_token(user_error_message)
+            message_sent = True
 
         finally:
             try:
@@ -606,7 +632,10 @@ async def handle_message(message: cl.Message):
             elapsed = time.time() - response_start_time
             final_text += f"\n\n*\u23f1 {elapsed:.2f}s*"
         response_msg.content = final_text
-        await response_msg.update()
+        if message_sent:
+            await response_msg.update()
+        else:
+            await response_msg.send()
 
         logger.info(
             "Response delivered: conversation=%s question_id=%s chunks=%s characters=%s preview='%s'",

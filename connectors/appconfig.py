@@ -1,7 +1,8 @@
 import os
 import logging
+import json
 
-from typing import Dict, Any
+from typing import Any
 from azure.identity import ChainedTokenCredential, ManagedIdentityCredential, AzureCliCredential
 from azure.identity.aio import ChainedTokenCredential as AsyncChainedTokenCredential, ManagedIdentityCredential as AsyncManagedIdentityCredential, AzureCliCredential as AsyncAzureCliCredential
 from azure.appconfiguration import AzureAppConfigurationClient
@@ -37,6 +38,7 @@ class AppConfigClient:
         self.connected: bool = False
 
         endpoint = os.getenv("APP_CONFIG_ENDPOINT")
+        self.endpoint = endpoint
 
         # Local/dev friendly behavior: if endpoint is not provided, run with env vars only.
         if not endpoint:
@@ -103,6 +105,63 @@ class AppConfigClient:
 
     def get(self, key: str, default: Any = None, type: type = str) -> Any:
         return self.get_value(key, default=default, allow_none=False, type=type)
+
+    def get_feature_flag(self, feature_name: str, default: bool = False) -> bool:
+        if not feature_name:
+            raise Exception('The feature_name parameter is required for get_feature_flag().')
+
+        logger = logging.getLogger("gpt_rag_ui.appconfig")
+        env_value = os.getenv(feature_name)
+        if env_value is not None:
+            return self._to_bool(env_value, default)
+
+        try:
+            value = self.get_value(feature_name, default=None, allow_none=True)
+            if value is not None:
+                return self._to_bool(value, default)
+        except Exception:
+            pass
+
+        feature_key = f".appconfig.featureflag/{feature_name}"
+
+        if self.endpoint and self.credential:
+            try:
+                direct_client = AzureAppConfigurationClient(
+                    base_url=self.endpoint,
+                    credential=self.credential,
+                )
+                for label in ("gpt-rag-ui", "gpt-rag", None):
+                    try:
+                        setting = direct_client.get_configuration_setting(
+                            key=feature_key,
+                            label=label,
+                        )
+                    except Exception:
+                        continue
+                    enabled = self._parse_feature_flag_value(setting.value, default)
+                    logger.debug(
+                        "Feature flag '%s' resolved from Azure App Configuration label '%s': %s",
+                        feature_name,
+                        label or "<no label>",
+                        enabled,
+                    )
+                    return enabled
+            except Exception as exc:
+                logger.warning(
+                    "Unable to read feature flag '%s' directly from Azure App Configuration; using cached/default value. Error: %s",
+                    feature_name,
+                    exc,
+                )
+
+        for key in (feature_key, feature_name):
+            try:
+                value = self.get_config_with_retry(name=key)
+            except Exception:
+                value = None
+            if value is not None:
+                return self._parse_feature_flag_value(value, default)
+
+        return default
     
     def get_value(self, key: str, default: str = None, allow_none: bool = False, type: type = str) -> str:
 
@@ -134,6 +193,35 @@ class AppConfigClient:
                 return default
             
             raise Exception(f'The configuration variable {key} not found.')
+
+    def _parse_feature_flag_value(self, value: Any, default: bool) -> bool:
+        if isinstance(value, dict):
+            return self._to_bool(value.get("enabled"), default)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{"):
+                try:
+                    parsed = json.loads(stripped)
+                    return self._parse_feature_flag_value(parsed, default)
+                except json.JSONDecodeError:
+                    pass
+            return self._to_bool(stripped, default)
+        return self._to_bool(value, default)
+
+    def _to_bool(self, value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'y', 'on', 'enabled'}:
+                return True
+            if normalized in {'false', '0', 'no', 'n', 'off', 'disabled'}:
+                return False
+        return default
         
     def retry_before_sleep(self, retry_state):
         # Log the outcome of each retry attempt.

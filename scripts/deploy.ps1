@@ -199,14 +199,18 @@ Write-Host ""
 #endregion
 
 #region Login to ACR
-Write-Green ("🔐 Logging into ACR ({0} in {1})…" -f $values.CONTAINER_REGISTRY_NAME, $values.AZURE_RESOURCE_GROUP)
-try {
-    az acr login --name $values.CONTAINER_REGISTRY_NAME --resource-group $values.AZURE_RESOURCE_GROUP
-    Write-Green "✅ Logged into ACR."
-} catch {
-    $errMsg = $_.Exception.Message
-    Write-Yellow ("⚠️  Failed to login to ACR: {0}" -f $errMsg)
-    exit 1
+if ($script:UseLocalDocker) {
+    Write-Green ("🔐 Logging into ACR ({0} in {1})…" -f $values.CONTAINER_REGISTRY_NAME, $values.AZURE_RESOURCE_GROUP)
+    try {
+        az acr login --name $values.CONTAINER_REGISTRY_NAME --resource-group $values.AZURE_RESOURCE_GROUP
+        Write-Green "✅ Logged into ACR."
+    } catch {
+        $errMsg = $_.Exception.Message
+        Write-Yellow ("⚠️  Failed to login to ACR: {0}" -f $errMsg)
+        exit 1
+    }
+} else {
+    Write-Green "ℹ️  Skipping local ACR login; az acr build authenticates with Azure CLI."
 }
 Write-Host ""
 #endregion
