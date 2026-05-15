@@ -1,13 +1,16 @@
+import asyncio
+import json
 import logging
 import os
 import secrets
+import urllib.parse
 from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from io import BytesIO
 
 from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from connectors import AppConfigClient, BlobClient
 from dependencies import get_config
@@ -139,6 +142,158 @@ def _format_release_value(value: str | None, missing_message: str) -> str:
     if normalized:
         return normalized
     return missing_message
+
+
+def _mock_demo_items() -> list[dict[str, str]]:
+    long_text_parts = [
+        "This mocked answer is intentionally long so the difference between streaming and buffered rendering is visible. "
+        "In streaming mode, each paragraph and image card appears as soon as the server emits it. ",
+        "The content simulates a retrieval-augmented response: first it frames the user question, then it adds supporting "
+        "context, then it progressively reveals visual evidence. ",
+        "A responsive chatbot should show useful partial output while the model is still composing the rest of the answer. "
+        "That early feedback helps users trust that the request is being processed. ",
+        "In non-streaming mode, the browser waits for the whole mocked response to finish before rendering anything. "
+        "The total content is the same, but the perceived latency is much higher. ",
+        "This final paragraph closes the response after five illustrative images. Use this page side-by-side with the "
+        "buffered page to demonstrate why token streaming improves the GPT-RAG chat experience.",
+    ]
+
+    image_titles = [
+        ("Hybrid search", "#2563eb", "#dbeafe"),
+        ("Grounded answer", "#16a34a", "#dcfce7"),
+        ("Citations", "#9333ea", "#f3e8ff"),
+        ("Multimodal context", "#ea580c", "#ffedd5"),
+        ("Responsive UX", "#0f766e", "#ccfbf1"),
+    ]
+
+    items: list[dict[str, str]] = []
+    for index, text in enumerate(long_text_parts, start=1):
+        items.append({"type": "text", "text": text})
+        title, stroke, fill = image_titles[index - 1]
+        svg = (
+            "<svg xmlns='http://www.w3.org/2000/svg' width='720' height='360' viewBox='0 0 720 360'>"
+            f"<rect width='720' height='360' rx='28' fill='{fill}'/>"
+            f"<rect x='32' y='32' width='656' height='296' rx='24' fill='white' stroke='{stroke}' stroke-width='6'/>"
+            f"<circle cx='{120 + index * 36}' cy='122' r='54' fill='{stroke}' opacity='0.18'/>"
+            f"<circle cx='{255 + index * 42}' cy='214' r='74' fill='{stroke}' opacity='0.12'/>"
+            f"<text x='360' y='155' text-anchor='middle' font-family='Segoe UI, Arial' font-size='44' "
+            f"font-weight='700' fill='{stroke}'>Picture {index}</text>"
+            f"<text x='360' y='218' text-anchor='middle' font-family='Segoe UI, Arial' font-size='30' "
+            f"fill='#111827'>{title}</text>"
+            "</svg>"
+        )
+        items.append(
+            {
+                "type": "image",
+                "alt": f"Mocked response picture {index}: {title}",
+                "src": f"data:image/svg+xml;charset=utf-8,{urllib.parse.quote(svg)}",
+            }
+        )
+    return items
+
+
+def _mock_demo_page(mode: str) -> str:
+    is_stream = mode == "stream"
+    title = "Streaming mocked response" if is_stream else "Buffered mocked response"
+    subtitle = (
+        "This page renders chunks as they arrive from a Server-Sent Events stream."
+        if is_stream
+        else "This page waits for the full mocked payload before rendering it."
+    )
+    badge = "STREAM MODE" if is_stream else "NON-STREAM MODE"
+    endpoint = "/demo/stream/events" if is_stream else "/demo/non-stream/data"
+    script = (
+        """
+        const source = new EventSource(endpoint);
+        source.addEventListener("message", (event) => renderItem(JSON.parse(event.data)));
+        source.addEventListener("done", () => {
+          status.textContent = "Complete";
+          source.close();
+        });
+        source.addEventListener("error", () => {
+          status.textContent = "Stream interrupted";
+          source.close();
+        });
+        """
+        if is_stream
+        else """
+        fetch(endpoint)
+          .then((response) => response.json())
+          .then((payload) => {
+            payload.items.forEach(renderItem);
+            status.textContent = "Complete";
+          })
+          .catch(() => {
+            status.textContent = "Request failed";
+          });
+        """
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    :root {{ color-scheme: light; font-family: "Segoe UI", Arial, sans-serif; }}
+    body {{ margin: 0; background: #f8fafc; color: #111827; }}
+    header {{ position: sticky; top: 0; z-index: 1; background: rgba(255,255,255,.92); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #e5e7eb; padding: 18px 28px; }}
+    main {{ max-width: 920px; margin: 0 auto; padding: 28px; }}
+    h1 {{ margin: 0 0 8px; font-size: 30px; }}
+    p {{ font-size: 18px; line-height: 1.7; }}
+    .badge {{ display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .08em; color: white;
+      background: {"#2563eb" if is_stream else "#6b7280"}; border-radius: 999px; padding: 7px 11px; }}
+    .status {{ float: right; color: #475569; font-size: 14px; margin-top: 6px; }}
+    .card {{ background: white; border: 1px solid #e5e7eb; border-radius: 18px; box-shadow: 0 8px 28px rgba(15,23,42,.08);
+      margin: 18px 0; padding: 22px; animation: fade-in .28s ease-out; }}
+    .card img {{ width: 100%; border-radius: 14px; display: block; }}
+    nav a {{ color: #2563eb; margin-right: 16px; text-decoration: none; font-weight: 600; }}
+    @keyframes fade-in {{ from {{ opacity: 0; transform: translateY(8px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <span class="badge">{badge}</span><span id="status" class="status">Loading...</span>
+    <h1>{title}</h1>
+    <div>{subtitle}</div>
+    <nav>
+      <a href="/demo/stream">Stream demo</a>
+      <a href="/demo/non-stream">Non-stream demo</a>
+      <a href="/">Chatbot</a>
+    </nav>
+  </header>
+  <main id="output"></main>
+  <script>
+    const endpoint = "{endpoint}";
+    const output = document.getElementById("output");
+    const status = document.getElementById("status");
+    function renderItem(item) {{
+      const card = document.createElement("section");
+      card.className = "card";
+      if (item.type === "image") {{
+        const img = document.createElement("img");
+        img.src = item.src;
+        img.alt = item.alt || "Mocked response image";
+        card.appendChild(img);
+      }} else {{
+        const p = document.createElement("p");
+        p.textContent = item.text;
+        card.appendChild(p);
+      }}
+      output.appendChild(card);
+    }}
+    {script}
+  </script>
+</body>
+</html>"""
+
+
+async def _mock_stream_events() -> AsyncIterator[str]:
+    for item in _mock_demo_items():
+        await asyncio.sleep(0.7 if item["type"] == "text" else 0.35)
+        yield f"data: {json.dumps(item)}\n\n"
+    yield "event: done\ndata: {}\n\n"
 
 
 def _configure_chainlit_prereqs(config: AppConfigClient) -> None:
@@ -607,6 +762,32 @@ def _create_chainlit_app(config: AppConfigClient, auth_state: AuthState | None =
             ),
         }
         return JSONResponse(payload)
+
+    @host_app.get("/demo/stream", response_class=HTMLResponse)
+    async def stream_demo_page():
+        return HTMLResponse(_mock_demo_page("stream"))
+
+    @host_app.get("/demo/stream/events")
+    async def stream_demo_events():
+        return StreamingResponse(
+            _mock_stream_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @host_app.get("/demo/non-stream", response_class=HTMLResponse)
+    @host_app.get("/demo/nonstream", response_class=HTMLResponse)
+    async def non_stream_demo_page():
+        return HTMLResponse(_mock_demo_page("non-stream"))
+
+    @host_app.get("/demo/non-stream/data")
+    @host_app.get("/demo/nonstream/data")
+    async def non_stream_demo_data():
+        await asyncio.sleep(5.25)
+        return JSONResponse({"items": _mock_demo_items()})
 
     host_app.mount("/api/download", blob_download_app)
     host_app.mount("/", chainlit_app)
